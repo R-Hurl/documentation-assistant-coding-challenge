@@ -81,7 +81,6 @@ def chunk_document(text: str, source: str) -> list[dict]:
     - Add ~50-token overlap by appending the tail of the prior chunk
     - Track the nearest preceding '## ' or '# ' heading for each chunk
     """
-    # TODO(human): implement chunking logic here
     paragraphs = text.split('\n\n')
     chunks = []
     current_paragraphs = []
