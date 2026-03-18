@@ -49,6 +49,25 @@ The RAG pipeline: user query → embed query → vector search → retrieve top-
 - Redis index name: `fusion-cache-docs`, key prefix: `doc`, storage: hash
 - **Idempotent**: assigns deterministic IDs (`{stem}_chunk_{index}`), checks Redis before embedding — re-runs skip the OpenAI API entirely if all chunks exist
 
+## Semantic Cache (`cache.py`)
+
+- Redis index name: `llmcache`, similarity threshold: `0.15` cosine distance (lower = stricter)
+- `check_cache` / `store_in_cache` / `flush_cache` — cache lifecycle; out-of-scope answers are never stored
+- `record_latency(metric_key, start)` — call with `time.monotonic()` start; writes elapsed ms to Redis
+- Metric keys: `metrics:hits`, `metrics:misses`, `metrics:latency_cached_ms_total`, `metrics:latency_uncached_ms_total`, `metrics:tokens_saved`
+- `get_metrics()` returns derived fields: `hit_rate`, `avg_latency_*_ms`, `estimated_cost_saved_usd`
+- All metric counters are reset on `flush_cache()`
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/ingest` | (Re-)run ingestion pipeline |
+| `POST` | `/ask` | Question → answer + sources + `cached` bool |
+| `GET` | `/ask/stream` | Token-by-token SSE stream |
+| `GET` | `/metrics` | Cache hit/miss stats and latency averages |
+| `DELETE` | `/cache` | Flush semantic cache and reset metrics |
+
 ## Key Dependency Pins
 
 These versions are pinned to resolve compatibility issues — do not upgrade without testing:
