@@ -15,7 +15,7 @@ from typing import AsyncGenerator
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from openai import OpenAI
 from redisvl.index import SearchIndex
 from redisvl.query import VectorQuery
@@ -81,11 +81,17 @@ def search_chunks(query_embedding: list[float], top_k: int = TOP_K) -> list[dict
 # ---------------------------------------------------------------------------
 # Step 3 — Prompt
 # ---------------------------------------------------------------------------
-def build_prompt(question: str, chunks: list[dict]) -> list:
+def build_prompt(question: str, chunks: list[dict], history: list[dict] | None = None) -> list:
     """
-    Format retrieved chunks into a [SystemMessage, HumanMessage] list.
+    Format retrieved chunks into a chat message list.
+
+    Structure:
+        [SystemMessage(context)]
+        [HumanMessage(prior Q), AIMessage(prior A), ...]  ← from history
+        [HumanMessage(current question)]
 
     The system message instructs the model to answer from context only.
+    History dicts have shape: {"role": "user"|"assistant", "content": "..."}.
     """
     context_blocks = []
     for i, chunk in enumerate(chunks, start=1):
@@ -102,20 +108,27 @@ def build_prompt(question: str, chunks: list[dict]) -> list:
     {context}
     """
 
-    return [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Question: {question}"),
-    ]
+    messages = [SystemMessage(content=system_prompt)]
+
+    if history:
+        for msg in history:
+            if msg["role"] == "user":
+                messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                messages.append(AIMessage(content=msg["content"]))
+
+    messages.append(HumanMessage(content=f"Question: {question}"))
+    return messages
 
 
 # ---------------------------------------------------------------------------
 # Step 4 — Generate (sync)
 # ---------------------------------------------------------------------------
-def generate_answer(question: str, chunks: list[dict]) -> dict:
+def generate_answer(question: str, chunks: list[dict], history: list[dict] | None = None) -> dict:
     """
     Call the LLM synchronously and return {"answer": str, "sources": list[str]}.
     """
-    messages = build_prompt(question, chunks)
+    messages = build_prompt(question, chunks, history)
     llm = ChatOpenAI(model=CHAT_MODEL, temperature=0)
     response = llm.invoke(messages)
     if OUT_OF_SCOPE_ANSWER.casefold() in response.content.strip().casefold():
@@ -128,9 +141,9 @@ def generate_answer(question: str, chunks: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Step 5 — Stream (async)
 # ---------------------------------------------------------------------------
-async def stream_answer(question: str, chunks: list[dict]) -> AsyncGenerator[str, None]:
+async def stream_answer(question: str, chunks: list[dict], history: list[dict] | None = None) -> AsyncGenerator[str, None]:
     """Yield JSON-encoded token events for SSE streaming."""
-    messages = build_prompt(question, chunks)
+    messages = build_prompt(question, chunks, history)
     llm = ChatOpenAI(model=CHAT_MODEL, temperature=0, streaming=True)
 
     async for token in llm.astream(messages):

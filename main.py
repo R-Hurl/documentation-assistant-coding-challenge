@@ -11,6 +11,7 @@ DELETE /cache         : flush the semantic cache and reset metrics
 """
 
 import time
+import uuid
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -19,6 +20,7 @@ from sse_starlette.sse import EventSourceResponse
 import cache
 import ingest
 import rag
+import session
 
 app = FastAPI(title="RTFM For Me", version="0.1.0")
 
@@ -28,6 +30,7 @@ app = FastAPI(title="RTFM For Me", version="0.1.0")
 # ---------------------------------------------------------------------------
 class AskRequest(BaseModel):
     question: str
+    session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -46,31 +49,49 @@ def run_ingest():
 @app.post("/ask")
 def ask(body: AskRequest):
     """Check semantic cache first; fall back to full RAG pipeline on miss."""
+    session_id = body.session_id or str(uuid.uuid4())
+    history = session.get_history(session_id)
+
     start = time.monotonic()
     cached_result = cache.check_cache(body.question)
     if cached_result is not None:
         cache.record_latency("metrics:latency_cached_ms_total", start)
-        return {**cached_result, "cached": True}
+        session.append_messages(session_id, body.question, cached_result["answer"])
+        return {**cached_result, "cached": True, "session_id": session_id}
 
     # Cache miss: run full RAG pipeline
     embedding = rag.embed_query(body.question)
     chunks    = rag.search_chunks(embedding)
-    result    = rag.generate_answer(body.question, chunks)
+    result    = rag.generate_answer(body.question, chunks, history)
 
     if result["answer"] != rag.OUT_OF_SCOPE_ANSWER:
         # Don't cache out-of-scope answers; they may mislead future similar queries.
         cache.store_in_cache(body.question, result)
 
+    session.append_messages(session_id, body.question, result["answer"])
     cache.record_latency("metrics:latency_uncached_ms_total", start)
-    return {**result, "cached": False}
+    return {**result, "cached": False, "session_id": session_id}
 
 
 @app.get("/ask/stream")
-async def ask_stream(question: str):
+async def ask_stream(question: str, session_id: str | None = None):
     """Stream a token-by-token answer via Server-Sent Events."""
+    resolved_session_id = session_id or str(uuid.uuid4())
+    history = session.get_history(resolved_session_id)
+
     embedding = rag.embed_query(question)
     chunks = rag.search_chunks(embedding)
-    return EventSourceResponse(rag.stream_answer(question, chunks))
+
+    async def stream_and_save():
+        full_answer = []
+        async for token_json in rag.stream_answer(question, chunks, history):
+            full_answer.append(token_json)
+            yield token_json
+        import json as _json
+        answer_text = "".join(_json.loads(t)["token"] for t in full_answer)
+        session.append_messages(resolved_session_id, question, answer_text)
+
+    return EventSourceResponse(stream_and_save())
 
 
 # ---------------------------------------------------------------------------

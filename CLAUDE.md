@@ -49,6 +49,15 @@ The RAG pipeline: user query → embed query → vector search → retrieve top-
 - Redis index name: `fusion-cache-docs`, key prefix: `doc`, storage: hash
 - **Idempotent**: assigns deterministic IDs (`{stem}_chunk_{index}`), checks Redis before embedding — re-runs skip the OpenAI API entirely if all chunks exist
 
+## Session Store (`session.py`)
+
+- Redis key format: `session:{session_id}`, stored as a list of JSON-serialized message dicts
+- `get_history(session_id)` — `LRANGE session:{id} 0 -1`, returns last `MAX_HISTORY * 2` messages (10 turns = 20 messages)
+- `append_messages(session_id, user_msg, assistant_msg)` — `RPUSH` two JSON dicts, then `EXPIRE session:{id} SESSION_TTL`
+- `session_key(session_id)` — helper returning `session:{session_id}`
+- TTL: `SESSION_TTL = 86_400` (24 hours), refreshed on every write
+- Max history: `MAX_HISTORY = 10` turns injected into prompt
+
 ## Semantic Cache (`cache.py`)
 
 - Redis index name: `llmcache`, similarity threshold: `0.15` cosine distance (lower = stricter)
@@ -63,8 +72,8 @@ The RAG pipeline: user query → embed query → vector search → retrieve top-
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/ingest` | (Re-)run ingestion pipeline |
-| `POST` | `/ask` | Question → answer + sources + `cached` bool |
-| `GET` | `/ask/stream` | Token-by-token SSE stream |
+| `POST` | `/ask` | Question → answer + sources + `cached` bool + `session_id`; accepts optional `session_id` in body |
+| `GET` | `/ask/stream` | Token-by-token SSE stream; accepts optional `session_id` query param |
 | `GET` | `/metrics` | Cache hit/miss stats and latency averages |
 | `DELETE` | `/cache` | Flush semantic cache and reset metrics |
 
